@@ -4,7 +4,7 @@
 #define RETURN0AND1 0x10
 
 Preprocess::Preprocess()
-  :feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
+  :feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1) /*, intensity_thres(2800.0), noise_intensity_thres(2500.0), search_radius(0.5) */
 {
   inf_bound = 10;
   N_SCANS   = 6;
@@ -182,9 +182,88 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
   }
 }
 
+/* void Preprocess::extract_high_intensity(PointCloudXYZI &pl_high_intensity, PointCloudXYZI &pl_surf_label)
+{
+  pl_high_intensity.clear();
+  for (uint i = 0; i < pl_surf_label.size(); i++)
+  {
+    if (pl_surf_label[i].intensity > intensity_thres)
+    {
+      pl_high_intensity.push_back(pl_surf_label[i]);
+      pl_surf_label[i].intensity = 0;
+    }
+  }
+}
+
+void Preprocess::extract_points_for_clustering(PointCloudXYZI &pl_high_intensity, PointCloudXYZI &pl_for_clustering, PointCloudXYZI &pl_surf_label)
+{
+  pl_for_clustering.clear();
+  // add points in a radius around high intensity points
+  pcl::KdTreeFLANN<PointType> clustering_kdtree;
+  clustering_kdtree.setInputCloud(pl_surf_label.makeShared());
+  int pl_high_intensity_size = pl_high_intensity.size();
+  for (uint i = 0; i < pl_high_intensity_size; i++)
+  {
+    PointType pt = pl_high_intensity[i];
+    vector<int> pointIdxRadiusSearch;
+    vector<float> pointRadiusSquaredDistance;
+    if (clustering_kdtree.radiusSearch(pt, search_radius, pointIdxRadiusSearch, pointRadiusSquaredDistance) > 0)
+    {
+      for (uint j = 0; j < pointIdxRadiusSearch.size(); j++)
+      {
+        if (pl_surf_label.points[pointIdxRadiusSearch[j]].intensity != 0)
+        {
+          pl_high_intensity.push_back(pl_surf_label.points[pointIdxRadiusSearch[j]]);
+          pl_surf_label.points[pointIdxRadiusSearch[j]].intensity = 0;
+        }
+      }
+    }
+  }
+}
+
+void Preprocess::denoise_by_intensity_filter(const PointCloudXYZI &pl_surf, const PointCloudXYZI &pl_high_intensity, PointCloudXYZI &pl_noise, PointCloudXYZI &pl_surf_label)
+{
+  // eliminate the points with low intensity around points with high intensity
+  pcl::KdTreeFLANN<PointType> denoise_kdtree;
+  denoise_kdtree.setInputCloud(pl_surf.makeShared());
+  pl_noise.clear();  
+  int pl_high_intensity_size = pl_high_intensity.size();
+  for (uint i = 0; i < pl_high_intensity_size; i++)
+  {
+    PointType pt = pl_high_intensity[i];
+    vector<int> pointIdxRadiusSearch;
+    vector<float> pointRadiusSquaredDistance;
+    if (denoise_kdtree.radiusSearch(pt, search_radius, pointIdxRadiusSearch, pointRadiusSquaredDistance) > 0)
+    {
+      for (uint j = 0; j < pointIdxRadiusSearch.size(); j++)
+      {
+        if (pl_surf.points[pointIdxRadiusSearch[j]].intensity < noise_intensity_thres)
+        {
+          pl_noise.push_back(pl_surf.points[pointIdxRadiusSearch[j]]);
+          pl_surf_label.points[pointIdxRadiusSearch[j]].intensity = 0;
+        }
+      }
+    }
+  }
+}
+
+void Preprocess::denoise_by_clustering(const PointCloudXYZI &pl_high_intensity, PointCloudXYZI &pl_noise)
+{
+  // Apply Statistical Outlier Removal (SOR)
+  PointCloudXYZI filtered_cloud;
+  pcl::StatisticalOutlierRemoval<PointType> sor;
+  sor.setInputCloud(pl_high_intensity.makeShared());
+  sor.setMeanK(50); // Number of nearest neighbors to analyze
+  sor.setStddevMulThresh(1.0); // Threshold for standard deviation
+  sor.filter(filtered_cloud);
+  std::cout << "Point cloud size before SOR: " << pl_high_intensity.size() << std::endl;
+  std::cout << "Filtered point cloud to " << filtered_cloud.size() << " points after SOR." << std::endl << std::endl;
+} */
+
 void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
 {
   pl_surf.clear();
+  // pl_surf_label.clear();
   pl_corn.clear();
   pl_full.clear();
   pcl::PointCloud<ouster_ros::Point> pl_orig;
@@ -192,6 +271,9 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
   int plsize = pl_orig.size();
   pl_corn.reserve(plsize);
   pl_surf.reserve(plsize);
+  // pl_surf_label.reserve(plsize);
+  // pl_high_intensity.reserve(plsize);
+  // pl_noise.reserve(plsize);
   if (feature_enabled)
   {
     for (int i = 0; i < N_SCANS; i++)
@@ -274,6 +356,33 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
 
       pl_surf.points.push_back(added_pt);
     }
+
+    /* if (denoise)
+    {
+      pl_surf_label = pl_surf;
+      extract_high_intensity(pl_high_intensity, pl_surf_label);
+      extract_points_for_clustering(pl_high_intensity, pl_for_clustering, pl_surf_label);
+      // denoise_by_intensity_filter(pl_surf, pl_high_intensity, pl_noise);
+      // denoise_by_clustering(pl_high_intensity, pl_noise);
+
+      // remove points with intensity 0 in pl_surf
+      int pl_surf_size = pl_surf.size();
+      PointCloudXYZI pl_surf_temp;
+      for (uint i = 0; i < pl_surf_size; i++)
+      {
+        if (pl_surf_label.points[i].intensity > 0)
+        {
+          pl_surf_temp.push_back(pl_surf.points[i]);
+        }
+      }
+      pl_surf.clear();
+      pl_surf = pl_surf_temp;
+    } */
+
+    // std::string filename = "/home/kodifly/workspaces/fastliosam_ws/src/FAST-LIO-SAM/third_party/FAST_LIO/PCD/scans/" + 
+    // std::to_string(msg->header.stamp.toSec()) + ".pcd";
+    // pcl::io::savePCDFile(filename, pl_surf);
+    // ROS_INFO_STREAM(colorize("Saved LiDAR point cloud: " + filename, "\033[36m"));
   }
   // pub_func(pl_surf, pub_full, msg->header.stamp);
   // pub_func(pl_surf, pub_corn, msg->header.stamp);

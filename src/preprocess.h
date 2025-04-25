@@ -2,6 +2,9 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <livox_ros_driver/CustomMsg.h>
+#include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/filters/statistical_outlier_removal.h>
+#include <pcl/segmentation/extract_clusters.h>
 
 using namespace std;
 
@@ -93,16 +96,23 @@ class Preprocess
 
   // sensor_msgs::PointCloud2::ConstPtr pointcloud;
   PointCloudXYZI pl_full, pl_corn, pl_surf;
+  /* PointCloudXYZI pl_high_intensity, pl_noise, pl_for_clustering, pl_surf_label; */
   PointCloudXYZI pl_buff[128]; //maximum 128 line lidar
   vector<orgtype> typess[128]; //maximum 128 line lidar
   float time_unit_scale;
   int lidar_type, point_filter_num, N_SCANS, SCAN_RATE, time_unit;
   double blind;
+  /* bool denoise = false;
+  float intensity_thres, noise_intensity_thres, search_radius; */
   bool feature_enabled, given_offset_time;
   ros::Publisher pub_full, pub_surf, pub_corn;
     
 
   private:
+  /* void extract_high_intensity(PointCloudXYZI &pl_high_intensity, PointCloudXYZI &pl_surf_label);
+  void extract_points_for_clustering(PointCloudXYZI &pl_high_intensity, PointCloudXYZI &pl_for_clustering, PointCloudXYZI &pl_surf_label);
+  void denoise_by_intensity_filter(const PointCloudXYZI &pl_surf, const PointCloudXYZI &pl_high_intensity, PointCloudXYZI &pl_noise, PointCloudXYZI &pl_surf_label);
+  void denoise_by_clustering(const PointCloudXYZI &pl_high_intensity, PointCloudXYZI &pl_noise);  */
   void avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg);
   void oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
