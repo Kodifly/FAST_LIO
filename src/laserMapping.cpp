@@ -799,7 +799,7 @@ int main(int argc, char** argv)
     nh.param<float>("preprocess/intensity_thres", p_pre->intensity_thres, 2800.0);
     nh.param<float>("preprocess/noise_intensity_thres", p_pre->noise_intensity_thres, 2500.0);
     nh.param<float>("preprocess/search_radius", p_pre->search_radius, 0.5); */
-    nh.param<int>("preprocess/lidar_type", p_pre->lidar_type, AVIA);
+    nh.param<int>("preprocess/lidar_type", lidar_type, AVIA);
     nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 16);
     nh.param<int>("preprocess/timestamp_unit", p_pre->time_unit, US);
     nh.param<int>("preprocess/scan_rate", p_pre->SCAN_RATE, 10);
