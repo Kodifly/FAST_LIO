@@ -27,6 +27,8 @@ mapping:
     extrinsic_R: [1, 0, 0,
                   0, 1, 0,
                   0, 0, 1]
+    distance_trigger_thresh: 1   # meters (example)
+    trigger_log_path: "/home/kodifly/ssd2/isds_trigger_test/trigger_log.txt"
 
 publish:
     path_en:  false

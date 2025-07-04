@@ -59,17 +59,13 @@
 #include <livox_ros_driver/CustomMsg.h>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
+#include <std_srvs/Trigger.h>
+#include <iomanip>
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
-
-// Helper function to add colors to logs
-std::string colorize(const std::string& message, const std::string& color_code) {
-    return color_code + message + "\033[0m";  // \033[0m resets the color
-  }
-  
 
 /*** Time Log Variables ***/
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
@@ -119,9 +115,6 @@ PointCloudXYZI::Ptr normvec(new PointCloudXYZI(100000, 1));
 PointCloudXYZI::Ptr laserCloudOri(new PointCloudXYZI(100000, 1));
 PointCloudXYZI::Ptr corr_normvect(new PointCloudXYZI(100000, 1));
 PointCloudXYZI::Ptr _featsArray;
-/* PointCloudXYZI::Ptr  high_intensity_points(new PointCloudXYZI());
-PointCloudXYZI::Ptr  noise_points(new PointCloudXYZI());
-PointCloudXYZI::Ptr  high_intensity_points_world(new PointCloudXYZI()); */
 
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
@@ -148,6 +141,32 @@ geometry_msgs::PoseStamped msg_body_pose;
 
 shared_ptr<Preprocess> p_pre(new Preprocess());
 shared_ptr<ImuProcess> p_imu(new ImuProcess());
+
+ros::ServiceClient save_image_client;
+bool save_image_trigger_initialized = false;
+V3D last_trigger_position(Zero3d);
+double DISTANCE_TRIGGER_THRESHOLD = 1.0; // default, can be overridden via ROS param
+
+std::ofstream trigger_log_fs;
+
+void triggerLog(const std::string &msg)
+{
+    if (trigger_log_fs.is_open())
+    {
+        // Convert LiDAR time to yymmddHHMMSS.mmm format (UTC)
+        time_t t_sec = static_cast<time_t>(last_timestamp_lidar);
+        std::tm tm_time;
+#ifdef _WIN32
+        gmtime_s(&tm_time, &t_sec);
+#else
+        gmtime_r(&t_sec, &tm_time);
+#endif
+        char time_buf[20];
+        strftime(time_buf, sizeof(time_buf), "%Y%m%d%H%M%S", &tm_time);
+        int millis = static_cast<int>((last_timestamp_lidar - t_sec) * 1000.0); // 0-999
+        trigger_log_fs << time_buf << std::setw(3) << std::setfill('0') << millis << " " << msg << std::endl;
+    }
+}
 
 void SigHandle(int sig)
 {
@@ -298,16 +317,9 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
-    // std::cout << "pl size: " << ptr->size() << std::endl;
-
-    /* high_intensity_points->clear();
-    *high_intensity_points = p_pre->pl_high_intensity;
-    *noise_points = p_pre->pl_noise; */
-
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(msg->header.stamp.toSec());
     last_timestamp_lidar = msg->header.stamp.toSec();
-    // std::cout << "lidar time: " << setprecision(18) << last_timestamp_lidar << std::endl;
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
@@ -508,8 +520,7 @@ void publish_frame_world(const ros::Publisher & pubLaserCloudFull)
 
         sensor_msgs::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
-        // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-        laserCloudmsg.header.stamp = ros::Time().fromSec(last_timestamp_lidar);
+        laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
         laserCloudmsg.header.frame_id = "camera_init";
         pubLaserCloudFull.publish(laserCloudmsg);
         publish_count -= PUBFRAME_PERIOD;
@@ -607,8 +618,7 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
 {
     odomAftMapped.header.frame_id = "camera_init";
     odomAftMapped.child_frame_id = "body";
-    // odomAftMapped.header.stamp = ros::Time().fromSec(lidar_end_time);// ros::Time().fromSec(lidar_end_time);
-    odomAftMapped.header.stamp = ros::Time().fromSec(last_timestamp_lidar);// ros::Time().fromSec(lidar_end_time);
+    odomAftMapped.header.stamp = ros::Time().fromSec(lidar_end_time);// ros::Time().fromSec(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
     pubOdomAftMapped.publish(odomAftMapped);
     auto P = kf.get_P();
@@ -635,6 +645,48 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
     q.setZ(odomAftMapped.pose.pose.orientation.z);
     transform.setRotation( q );
     br.sendTransform( tf::StampedTransform( transform, odomAftMapped.header.stamp, "camera_init", "body" ) );
+
+    // --- Distance-based trigger service ---
+    if (!save_image_trigger_initialized) {
+        last_trigger_position = state_point.pos;
+        save_image_trigger_initialized = true;
+    } else {
+        V3D diff_vec = state_point.pos - last_trigger_position;
+        double dist = diff_vec.norm();
+        {
+            ROS_INFO_STREAM("[DistanceTrigger] dist: " << dist);
+        }
+        if (dist >= DISTANCE_TRIGGER_THRESHOLD && save_image_client) {
+            std_srvs::Trigger srv;
+            if (save_image_client.call(srv)) {
+                if (srv.response.success) {
+                    {
+                        std::stringstream ss;
+                        ss << "[DistanceTrigger] dist: " << dist << " meters";
+                        // create a new line
+                        ss << "\n";
+                        ss << "[DistanceTrigger] Service /save_image called successfully: " << srv.response.message;
+                        ROS_INFO_STREAM(ss.str());
+                        triggerLog(ss.str());
+                    }
+                } else {
+                    {
+                        std::stringstream ss;
+                        ss << "[DistanceTrigger] Service /save_image responded with failure: " << srv.response.message;
+                        ROS_WARN_STREAM(ss.str());
+                        triggerLog(ss.str());
+                    }
+                }
+            } else {
+                {
+                    std::string s = "[DistanceTrigger] Failed to call service /save_image";
+                    ROS_ERROR("%s", s.c_str());
+                    triggerLog(s);
+                }
+            }
+            last_trigger_position = state_point.pos; // reset for next meter
+        }
+    }
 }
 
 void publish_path(const ros::Publisher pubPath)
@@ -797,10 +849,6 @@ int main(int argc, char** argv)
     nh.param<double>("mapping/b_gyr_cov",b_gyr_cov,0.0001);
     nh.param<double>("mapping/b_acc_cov",b_acc_cov,0.0001);
     nh.param<double>("preprocess/blind", p_pre->blind, 0.01);
-    /* nh.param<bool>("preprocess/denoise", p_pre->denoise, false);
-    nh.param<float>("preprocess/intensity_thres", p_pre->intensity_thres, 2800.0);
-    nh.param<float>("preprocess/noise_intensity_thres", p_pre->noise_intensity_thres, 2500.0);
-    nh.param<float>("preprocess/search_radius", p_pre->search_radius, 0.5); */
     nh.param<int>("preprocess/lidar_type", lidar_type, AVIA);
     nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 16);
     nh.param<int>("preprocess/timestamp_unit", p_pre->time_unit, US);
@@ -813,6 +861,15 @@ int main(int argc, char** argv)
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
+    nh.param<double>("mapping/distance_trigger_thresh", DISTANCE_TRIGGER_THRESHOLD, 1.0);
+    string trigger_log_path;
+    nh.param<string>("mapping/trigger_log_path", trigger_log_path, string(string(ROOT_DIR)+"Log/trigger_log.txt"));
+    // Always start a fresh trigger log each run
+    trigger_log_fs.open(trigger_log_path, std::ios::out | std::ios::trunc);
+    if(!trigger_log_fs.is_open())
+    {
+        ROS_WARN_STREAM("Failed to open trigger log file at " << trigger_log_path);
+    }
 
     p_pre->lidar_type = lidar_type;
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
@@ -824,9 +881,6 @@ int main(int argc, char** argv)
     int effect_feat_num = 0, frame_num = 0;
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
     bool flg_EKF_converged, EKF_stop_flg = 0;
-
-    /*** initialize the map ***/
-    /* high_intensity_points_world->clear(); */
     
     FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
     HALF_FOV_COS = cos((FOV_DEG) * 0.5 * PI_M / 180.0);
@@ -883,12 +937,8 @@ int main(int argc, char** argv)
             ("/Odometry", 100000);
     ros::Publisher pubPath          = nh.advertise<nav_msgs::Path> 
             ("/path", 100000);
-    /* ros::Publisher pubHighIntensityCloud = nh.advertise<sensor_msgs::PointCloud2>
-            ("/high_intensity_points", 100000);
-    ros::Publisher pubNoiseCloud = nh.advertise<sensor_msgs::PointCloud2>
-            ("/noise_points", 100000);
-    ros::Publisher pubHighIntensityCloudWorld = nh.advertise<sensor_msgs::PointCloud2>
-            ("/high_intensity_points_world", 100000); */
+
+    save_image_client = nh.serviceClient<std_srvs::Trigger>("/save_image");
 //------------------------------------------------------------------------------------------------------
     signal(SIGINT, SigHandle);
     ros::Rate rate(5000);
@@ -925,13 +975,6 @@ int main(int argc, char** argv)
                 ROS_WARN("No point, skip this scan!\n");
                 continue;
             }
-
-            /* feats_undistort->width = feats_undistort->size();
-            feats_undistort->height = 1;
-            std::string filename = "/home/kodifly/workspaces/fastliosam_ws/src/FAST-LIO-SAM/third_party/FAST_LIO/PCD/scans/" + 
-            std::to_string(lidar_end_time) + ".pcd";
-            pcl::io::savePCDFile(filename, *feats_undistort);
-            ROS_INFO_STREAM(colorize("Saved LiDAR point cloud: " + filename, "\033[36m")); */
 
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
                             false : true;
@@ -1017,48 +1060,6 @@ int main(int argc, char** argv)
             /******* Publish points *******/
             if (path_en)                         publish_path(pubPath);
             if (scan_pub_en || pcd_save_en)      publish_frame_world(pubLaserCloudFull);
-
-            // publish intensity point cloud
-            /* int intensity_pc_size = high_intensity_points->points.size();
-            PointCloudXYZI::Ptr highIntensityCloudWorld( \
-                            new PointCloudXYZI(intensity_pc_size, 1));
-    
-            for (int i = 0; i < intensity_pc_size; i++)
-            {
-                RGBpointBodyToWorld(&high_intensity_points->points[i], \
-                                    &highIntensityCloudWorld->points[i]);
-                high_intensity_points_world->push_back(highIntensityCloudWorld->points[i]);
-            }
-            // std::cout << "high intensity points in world: " << high_intensity_points_world->size() << std::endl;
-
-            sensor_msgs::PointCloud2 highIntensityCloudmsg;
-            pcl::toROSMsg(*highIntensityCloudWorld, highIntensityCloudmsg);
-            highIntensityCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-            highIntensityCloudmsg.header.frame_id = "map";
-            pubHighIntensityCloud.publish(highIntensityCloudmsg);
-
-            // publish high intensity point cloud in world frame
-            sensor_msgs::PointCloud2 highIntensityCloudWorldmsg;
-            pcl::toROSMsg(*high_intensity_points_world, highIntensityCloudWorldmsg);
-            highIntensityCloudWorldmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-            highIntensityCloudWorldmsg.header.frame_id = "map";
-            pubHighIntensityCloudWorld.publish(highIntensityCloudWorldmsg);
-
-            // publish noise point cloud
-            int noise_pc_size = noise_points->points.size();
-            PointCloudXYZI::Ptr noiseCloudWorld( \
-                            new PointCloudXYZI(noise_pc_size, 1));
-            for (int i = 0; i < noise_pc_size; i++)
-            {
-                RGBpointBodyToWorld(&noise_points->points[i], \
-                                    &noiseCloudWorld->points[i]);
-            }
-            sensor_msgs::PointCloud2 noiseCloudmsg;
-            pcl::toROSMsg(*noiseCloudWorld, noiseCloudmsg);
-            noiseCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-            noiseCloudmsg.header.frame_id = "map";
-            pubNoiseCloud.publish(noiseCloudmsg); */
-
             if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body);
             // publish_effect_world(pubLaserCloudEffect);
             // publish_map(pubLaserCloudMap);
@@ -1131,5 +1132,6 @@ int main(int argc, char** argv)
         fclose(fp2);
     }
 
+    if(trigger_log_fs.is_open()) trigger_log_fs.close();
     return 0;
 }
